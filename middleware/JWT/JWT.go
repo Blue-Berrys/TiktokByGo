@@ -51,7 +51,7 @@ func GetToken(userid uint, username string, password string) (string, error) {
 
 }
 
-// 解析Token变成Claim
+// TokenToClaim 解析Token变成Claim
 func TokenToClaim(tokenStr string) (*MyClaims, bool) {
 	token, _ := jwt.ParseWithClaims(tokenStr, &MyClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return jwtKey, nil
