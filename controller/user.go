@@ -1,92 +1,148 @@
 package controller
 
 import (
+	"errors"
+	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/neverTanking/TiktokByGo/middleware/JWT"
+	"github.com/neverTanking/TiktokByGo/model"
 	"net/http"
-	"sync/atomic"
+	"strconv"
 )
 
-// usersLoginInfo use map to store user info, and key is username+password for demo
-// user data will be cleared every time the server starts
-// test data: username=zhanglei, password=douyin
-var usersLoginInfo = map[string]User{
-	"zhangleidouyin": {
-		Id:            1,
-		Name:          "zhanglei",
-		FollowCount:   10,
-		FollowerCount: 5,
-		IsFollow:      true,
-	},
-}
-
-var userIdSequence = int64(1)
+var errNotFound = errors.New("user not found")
+var errWrongPassword = errors.New("wrong password")
 
 type UserLoginResponse struct {
 	Response
-	UserId int64  `json:"user_id,omitempty"`
+	UserId uint   `json:"user_id,omitempty"`
 	Token  string `json:"token"`
 }
 
 type UserResponse struct {
 	Response
-	User User `json:"user"`
+	User model.User `json:"user"`
 }
 
+func isUsernameValid(username string) bool {
+	return len(username) > 0 && len(username) <= 32
+}
+func isPasswordValid(password string) bool {
+	return len(password) > 0 && len(password) <= 32
+}
+
+// Register 用户登录处理函数，返回用户登录信息
 func Register(c *gin.Context) {
+	// 1. http请求中获取用户信息验证合法性
 	username := c.Query("username")
 	password := c.Query("password")
-
-	token := username + password
-
-	if _, exist := usersLoginInfo[token]; exist {
+	if !(isUsernameValid(username) && isPasswordValid(password)) {
 		c.JSON(http.StatusOK, UserLoginResponse{
-			Response: Response{StatusCode: 1, StatusMsg: "User already exist"},
-		})
-	} else {
-		atomic.AddInt64(&userIdSequence, 1)
-		newUser := User{
-			Id:   userIdSequence,
-			Name: username,
-		}
-		usersLoginInfo[token] = newUser
-		c.JSON(http.StatusOK, UserLoginResponse{
-			Response: Response{StatusCode: 0},
-			UserId:   userIdSequence,
-			Token:    username + password,
+			Response: Response{StatusCode: Fail, StatusMsg: Valid},
 		})
 	}
+
+	// 3.1 存在则报错
+
+	// 3.2 不存在则创建用户，并返回用户信息
+	userId, err := model.CreatUser(username, password)
+	if err != nil {
+		errors.Unwrap(err)
+		c.JSON(http.StatusOK, UserLoginResponse{
+			Response: Response{StatusCode: Fail, StatusMsg: Existed},
+		})
+		fmt.Println(fmt.Errorf("%v", err))
+		c.JSON(http.StatusOK, UserLoginResponse{
+			Response: Response{StatusCode: Fail, StatusMsg: UnknownReason},
+		})
+	}
+	// 4.生成token
+	token, err := JWT.GetToken(userId, username, password)
+	if err != nil {
+		fmt.Println(fmt.Errorf("token generate err: %v", err))
+		c.JSON(http.StatusOK, UserLoginResponse{
+			Response: Response{StatusCode: Fail, StatusMsg: TokenFail},
+		})
+	}
+	c.JSON(http.StatusOK, UserLoginResponse{
+		Response: Response{StatusCode: Success, StatusMsg: SignUpOk},
+		UserId:   userId,
+		Token:    token,
+	})
 }
 
+// Login 用户登录处理函数，返回用户登录信息
 func Login(c *gin.Context) {
+	// 1. http请求中获取用户信息并检查输入合法性
 	username := c.Query("username")
 	password := c.Query("password")
-
-	token := username + password
-
-	if user, exist := usersLoginInfo[token]; exist {
+	if !(isUsernameValid(username) && isPasswordValid(password)) {
 		c.JSON(http.StatusOK, UserLoginResponse{
-			Response: Response{StatusCode: 0},
-			UserId:   user.Id,
-			Token:    token,
-		})
-	} else {
-		c.JSON(http.StatusOK, UserLoginResponse{
-			Response: Response{StatusCode: 1, StatusMsg: "User doesn't exist"},
+			Response: Response{StatusCode: Fail, StatusMsg: Valid},
 		})
 	}
+
+	// 2. 查询用户是否存在，并返回用户信息
+	user, exist := model.SearchUserByName(username)
+	if !exist {
+		c.JSON(http.StatusOK, UserLoginResponse{
+			Response: Response{StatusCode: Fail, StatusMsg: NotExisted},
+		})
+		return
+	}
+	//3. 验证密码
+	err := model.SearchUserForVerify(user.ID, password)
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			c.JSON(http.StatusOK, UserLoginResponse{
+				Response: Response{StatusCode: Fail, StatusMsg: NotExisted},
+			})
+			return
+		}
+		if errors.Is(err, errWrongPassword) {
+			c.JSON(http.StatusOK, UserLoginResponse{
+				Response: Response{StatusCode: Fail, StatusMsg: WrongPassword},
+			})
+			return
+		}
+		//Unknown reason
+
+		c.JSON(http.StatusOK, UserLoginResponse{
+			Response: Response{StatusCode: Fail, StatusMsg: UnknownReason},
+		})
+		return
+	}
+
+	// 4. 生成token
+	token, err := JWT.GetToken(user.ID, username, password)
+	if err != nil {
+		fmt.Print(fmt.Errorf("token generate fail: %v", err))
+		c.JSON(http.StatusOK, UserLoginResponse{
+			Response: Response{StatusCode: Fail, StatusMsg: TokenFail},
+		})
+	}
+
+	// 5. 返回用户信息和token
+	c.JSON(http.StatusOK, UserLoginResponse{
+		Response: Response{StatusCode: Success, StatusMsg: LoginOk},
+		UserId:   user.ID,
+		Token:    token,
+	})
 }
 
+// UserInfo description: 获取用户信息处理函数，返回用户信息
 func UserInfo(c *gin.Context) {
-	token := c.Query("token")
 
-	if user, exist := usersLoginInfo[token]; exist {
+	var userId, _ = strconv.ParseUint(c.Query("user_id"), 10, 64)
+
+	user, ok := model.SearchUserByID(uint(userId))
+	if ok != true {
 		c.JSON(http.StatusOK, UserResponse{
-			Response: Response{StatusCode: 0},
-			User:     user,
-		})
-	} else {
-		c.JSON(http.StatusOK, UserResponse{
-			Response: Response{StatusCode: 1, StatusMsg: "User doesn't exist"},
+			Response: Response{StatusCode: Fail, StatusMsg: NotExisted},
 		})
 	}
+	c.JSON(http.StatusOK, UserResponse{
+		Response: Response{StatusCode: Success},
+		User:     user,
+	})
 }
